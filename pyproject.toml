@@ -16,6 +16,10 @@ dependencies = [
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.poetry.scripts]
+rns-host = "rns_package_manager.host:main"
+rns-pkg = "rns_package_manager.pkg:main"
+
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.11.5"
 bandit = "^1.8.3"

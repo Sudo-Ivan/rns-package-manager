@@ -7,9 +7,9 @@ import hashlib
 import json
 import tarfile
 import threading
-import colors
+from . import colors
 
-from common import (
+from .common import (
     APP_NAME,
     METADATA_ASPECT,
     FETCH_ASPECT,
@@ -532,7 +532,7 @@ def size_str(num, suffix='B'):
         num /= 1024.0
     return "%.2f %s%s" % (num, last_unit, suffix)
 
-if __name__ == "__main__":
+def main():
     try:
         parser = argparse.ArgumentParser(description="Reticulum Package Host")
 
@@ -579,3 +579,6 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         sys.exit(2)
+
+if __name__ == "__main__":
+    main()

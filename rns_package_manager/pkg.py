@@ -9,9 +9,9 @@ import hashlib
 import tarfile
 import zipfile
 import shutil
-import colors
+from . import colors
 
-from common import (
+from .common import (
     APP_NAME, 
     DEFAULT_TIMEOUT, 
     METADATA_ASPECT, 
@@ -784,6 +784,9 @@ def handle_search(args):
              print(f"  {colors.colorize(pkg_name, colors.BOLD)}")
              print(f"      Latest: {colors.info(latest_version['version'])} ({colors.detail(size_str(latest_version['archive_size']))}) StoreHash: {colors.detail(latest_version['store_hash'][:8]+'...')}")
              # TODO: Add description field to metadata
+             # Potential improvement: Show description if available
+             # if 'description' in latest_version:
+             #    print(f"      Desc: {colors.detail(latest_version['description'])}")
         else:
              print(f"  {colors.colorize(pkg_name, colors.BOLD)} {colors.warning('(No versions available)')}")
 
@@ -831,12 +834,12 @@ def handle_install(args):
              install_results[spec]["status"] = "failed"
              install_results[spec]["message"] = "Could not start fetch (check metadata?)"
              fail_count += 1
-             continue 
+             continue
         elif result is True: # Explicit check for True indicating already installed or cached & installed
             # Message already printed by start_fetch or install_from_cache
             install_results[spec]["status"] = "success"
             install_results[spec]["message"] = "Package already installed or installed from cache."
-            success_count += 1
+            # success_count += 1 # Counted later based on final status
             continue
 
         # If result is None (or implicitly), means fetch started, need to wait
@@ -849,22 +852,33 @@ def handle_install(args):
                          progress = current_fetch_resource.get_progress()
                          rate = current_fetch_resource.get_rate()
                          eta = current_fetch_resource.get_eta()
-                         eta_str = format_time(eta) if eta is not None else "N/A" 
+                         eta_str = format_time(eta) if eta is not None else "N/A"
                          print(f"\r{colors.info('Fetching:')} {progress*100:.1f}% ({colors.detail(size_str(rate))}/s, ETA: {colors.detail(eta_str)})   ", end="")
                          progress_update_time = time.time()
                  time.sleep(0.1)
              print("\n") # Clear progress line
 
              # Check the actual outcome after wait finishes
-             # The exit_event is set in fetch_concluded or link closed callbacks
-             # We need a way to know if the install succeeded or failed within fetch_concluded
-             # Let's assume fetch_concluded sets a global status or modifies install_results directly
-             # Re-check local state for confirmation? simpler to trust fetch_concluded status
+             # Assume install_from_cache (called within fetch_concluded) sets the status
+             # Re-check local state for final confirmation
+             local_state_final = load_local_state()
+             found_in_state = False
+             if pkg_name in local_state_final:
+                 for installed_version in local_state_final[pkg_name]:
+                     # We need to compare against the *specific* version we tried to install
+                     # The version might be 'latest', so we need the actual version fetched.
+                     # This info is lost after fetch_concluded clears current_fetch_package_info
+                     # TODO: fetch_concluded needs to pass back the *actual* installed version info
+                     # For now, just checking if *any* version is present after waiting isn't reliable enough
+                     # Let's assume fetch_concluded updated install_results[spec]["status"] correctly
+                     # If not updated, assume failure for now.
+                     pass # Placeholder logic, see TODO above
+
              if install_results[spec]["status"] is None: # If status wasn't set by fetch_concluded (e.g., timeout?)
                  RNS.log(f"Fetch/Install process for {spec} ended without explicit status.", RNS.LOG_WARNING)
                  install_results[spec]["status"] = "unknown"
                  install_results[spec]["message"] = "Process finished with unknown status (timeout or interruption?)"
-                 fail_count += 1 # Assume failure if unknown
+                 # fail_count += 1 # Counted later
 
         except KeyboardInterrupt:
              RNS.log("User interrupt during fetch/install wait.")
@@ -874,29 +888,32 @@ def handle_install(args):
              install_results[spec]["status"] = "interrupted"
              install_results[spec]["message"] = "Installation interrupted by user."
              # Don't increment fail_count, just report interruption
-             # We should probably exit entirely on interrupt?
-             # For now, just stop processing this package and move to summary
-             break # Exit the loop over specs
+             # Stop processing further specs on interrupt
+             break
 
     # Summary
     print(f"\n{colors.prompt('Installation Summary:')}")
+    final_success_count = 0
+    final_fail_count = 0
+    interrupted_count = 0
     for spec, result in install_results.items():
         status = result.get("status", "unknown")
-        message = result.get("message")
+        message = result.get("message", "")
         if status == "success":
             print(f"- {spec}: {colors.success('Success')}{f' ({message})' if message else ''}")
-            success_count += 1 # Adjust count based on final status
+            final_success_count += 1
         elif status == "failed" or status == "unknown":
             print(f"- {spec}: {colors.error(status.capitalize())}{f' ({message})' if message else ''}")
-            if status == "unknown" and spec not in [s for s, r in install_results.items() if r['status']=='failed']:
-                fail_count +=1 # Ensure unknown counts as fail unless already counted
+            final_fail_count += 1
         elif status == "interrupted":
             print(f"- {spec}: {colors.warning('Interrupted')}")
+            interrupted_count += 1
         else: # Should not happen
             print(f"- {spec}: {status}")
+            final_fail_count += 1 # Count unexpected as failure
 
-    if fail_count > 0:
-         return 1 # Indicate partial or total failure
+    if final_fail_count > 0 or interrupted_count > 0:
+         return 1 # Indicate partial/total failure or interruption
     return 0 # Indicate full success
 
 def handle_list(args):
@@ -910,20 +927,286 @@ def handle_list(args):
     print(f"{colors.prompt('-------------------')}")
     pkg_list = sorted(local_state.keys())
     for pkg_name in pkg_list:
-        # Assuming only one version installed for now per name
-        # TODO: Handle multiple installed versions
+        # TODO: Handle multiple installed versions if that becomes supported
         if local_state[pkg_name]:
-            install_info = local_state[pkg_name][-1] # Get latest install record
+            # Assume the last entry is the 'active' one for now
+            install_info = local_state[pkg_name][-1]
             version = install_info.get("version", "unknown")
             store_path = install_info.get("store_path", "unknown path")
-            hash_part = os.path.basename(store_path).split('-')[0] if store_path != "unknown path" else "unknown hash"
-            print(f"  {colors.colorize(pkg_name, colors.BOLD)}-{colors.info(version)}")
-            print(f"      Store Path: {colors.detail(f'.../{hash_part[:8]}.../{os.path.basename(store_path)}')}")
+            hash_part = os.path.basename(store_path).split('-')[0] if store_path != "unknown path" and '-' in os.path.basename(store_path) else "unknown_hash"
+            install_time_unix = install_info.get("installed_at")
+            install_time_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(install_time_unix)) if install_time_unix else "unknown time"
+
+            print(f"  {colors.colorize(pkg_name, colors.BOLD)}=={colors.info(version)}")
+            print(f"      Store Path: {colors.detail(store_path)}")
+            # print(f"      Store Hash: {colors.detail(hash_part)}") # Maybe redundant if in path
+            print(f"      Installed:  {colors.detail(install_time_str)}")
         else:
             print(f"  {colors.colorize(pkg_name, colors.BOLD)} {colors.warning('(installation record invalid)')}")
     print(f"{colors.prompt('-------------------')}")
     return 0
 
+def handle_uninstall(args):
+    """Handles the 'uninstall' command."""
+    packages_to_remove = args.packages
+    local_state = load_local_state()
+    removed_count = 0
+    not_found_count = 0
+    error_count = 0
+
+    print(f"{colors.prompt('Attempting to uninstall:')} {', '.join(packages_to_remove)}")
+
+    packages_actually_removed = []
+
+    for pkg_spec in packages_to_remove:
+        # TODO: Add version specification handling (e.g., pkg==version)
+        # For now, just removes the latest/only installed version by name
+        pkg_name = pkg_spec
+        if pkg_name not in local_state or not local_state[pkg_name]:
+            print(f"{colors.warning(f'Warning: Package {pkg_name} not found in local state.')}")
+            not_found_count += 1
+            continue
+
+        # Assume last entry is the one to remove
+        install_info = local_state[pkg_name][-1] # Get latest install record
+        version = install_info.get("version", "unknown")
+        store_path = install_info.get("store_path")
+
+        if not store_path or not os.path.isdir(store_path):
+            print(f"{colors.error(f'Error: Store path for {pkg_name}-{version} is invalid or missing:')} {store_path}", file=sys.stderr)
+            print(f"{colors.warning(f'Warning: Removing entry for {pkg_name}-{version} from state, but directory may need manual cleanup.')}", file=sys.stderr)
+            error_count += 1
+            # Remove from state even if directory is bad
+            local_state[pkg_name].pop()
+            if not local_state[pkg_name]:
+                 del local_state[pkg_name]
+            packages_actually_removed.append(f"{pkg_name}-{version}")
+            continue
+
+        print(f"{colors.info('Removing directory:')} {store_path}")
+        try:
+            shutil.rmtree(store_path)
+            RNS.log(f"Removed package directory {store_path}")
+            # Remove the specific version entry from the state
+            local_state[pkg_name].pop()
+            # If no more versions of this package exist, remove the package key
+            if not local_state[pkg_name]:
+                 del local_state[pkg_name]
+            removed_count += 1
+            packages_actually_removed.append(f"{pkg_name}-{version}")
+            print(f"{colors.success(f'Successfully removed {pkg_name}-{version}.')}")
+        except OSError as e:
+            print(f"{colors.error(f'Error removing directory {store_path}:')} {e}", file=sys.stderr)
+            RNS.log(f"Error removing package directory {store_path}: {e}", RNS.LOG_ERROR)
+            error_count += 1
+        except Exception as e:
+            print(f"{colors.error(f'Unexpected error removing {store_path}:')} {e}", file=sys.stderr)
+            RNS.log(f"Unexpected error removing package directory {store_path}: {e}", RNS.LOG_CRITICAL)
+            error_count += 1
+
+    if packages_actually_removed:
+        save_local_state(local_state)
+        RNS.log(f"Updated local state after removing: {', '.join(packages_actually_removed)}")
+
+    print(f"\n{colors.prompt('Uninstall Summary:')}")
+    print(f"  Successfully removed: {removed_count}")
+    print(f"  Not found: {not_found_count}")
+    print(f"  Errors encountered: {error_count}")
+
+    return 1 if error_count > 0 or not_found_count > 0 else 0
+
+def handle_update(args):
+    """Handles the 'update' command (currently checks for newer versions)."""
+    global host_metadata
+    profile_name = args.profile_name
+    packages_to_check = args.packages # Optional list of packages
+
+    profiles = load_host_profiles()
+    if profile_name not in profiles:
+        print(colors.error(f"Error: Host profile '{profile_name}' not found."), file=sys.stderr)
+        return 1
+
+    profile_data = profiles[profile_name]
+    metadata_hash_str = profile_data.get("metadata_hash")
+    if not metadata_hash_str:
+        print(colors.error(f"Error: Profile '{profile_name}' is missing metadata hash."), file=sys.stderr)
+        return 1
+
+    print(f"{colors.info('Checking for updates using profile:')} {profile_name}")
+
+    # We need to setup RNS and resolve path to get metadata
+    # This duplicates logic from main(), consider refactoring later
+    global reticulum, host_metadata_dest
+    try:
+        if not reticulum:
+            reticulum = RNS.Reticulum(args.config if hasattr(args, 'config') else None) # Use default config if not specified globally
+            print(f"{colors.info('rns-pkg using Reticulum config:')} {colors.detail(RNS.Reticulum.configdir)}")
+
+        metadata_hash = parse_destination(metadata_hash_str)
+        if not metadata_hash: return 1
+
+        print(f"{colors.info('Resolving host metadata path...')}")
+        if not resolve_path(metadata_hash, "metadata host"): return 1
+
+        host_identity = RNS.Identity.recall(metadata_hash)
+        if not host_identity:
+            RNS.log("Could not recall host Identity from profile metadata hash.", RNS.LOG_CRITICAL)
+            print(f"{colors.error('Error: Failed to identify the host from the profile.')}", file=sys.stderr)
+            return 1
+
+        host_metadata_dest = RNS.Destination(
+            host_identity, RNS.Destination.OUT, RNS.Destination.SINGLE,
+            APP_NAME, METADATA_ASPECT
+        )
+
+    except Exception as e:
+        print(f"{colors.error('Error: Network error setting up for update check:')} {e}", file=sys.stderr)
+        return 1
+
+    print(f"{colors.info('Fetching latest metadata from host...')}")
+    host_metadata = None # Clear previous metadata
+    if not request_metadata():
+        return 1
+    exit_event.clear()
+    exit_event.wait(DEFAULT_TIMEOUT) # Wait for metadata response
+
+    if not host_metadata or not host_metadata.get("packages"):
+        print(f"{colors.error('Failed to retrieve metadata from host.')}", file=sys.stderr)
+        return 1
+
+    print(f"{colors.info('Comparing with locally installed packages...')}")
+    local_state = load_local_state()
+    if not local_state:
+        print(f"{colors.info('No packages installed locally to update.')}")
+        return 0
+
+    updates_available = {}
+    host_packages = host_metadata.get("packages", {})
+
+    packages_in_scope = packages_to_check if packages_to_check else sorted(local_state.keys())
+
+    for pkg_name in packages_in_scope:
+        if pkg_name not in local_state or not local_state[pkg_name]:
+            if packages_to_check: # Only warn if user specifically asked for this package
+                print(f"{colors.warning(f'Warning: Package {pkg_name} not installed locally.')}")
+            continue
+
+        if pkg_name not in host_packages or not host_packages[pkg_name]:
+            # Package installed locally but not available on host anymore?
+            print(f"{colors.warning(f'Warning: Installed package {pkg_name} not found on host {profile_name}.')}")
+            continue
+
+        installed_info = local_state[pkg_name][-1] # Check latest installed version
+        installed_version = installed_info.get("version")
+        if not installed_version: continue # Skip invalid entries
+
+        latest_host_info = host_packages[pkg_name][0] # Host metadata is sorted latest first
+        latest_host_version = latest_host_info.get("version")
+        if not latest_host_version: continue
+
+        # Basic version comparison (assumes comparable strings, ideally use packaging.version)
+        # TODO: Implement proper version comparison (e.g., using 'packaging' library)
+        if latest_host_version != installed_version:
+             # Simplistic check: if they differ, assume host is newer if it's listed first
+             # This breaks if versions aren't strictly ordered or comparable like this
+             try:
+                 from packaging.version import parse as parse_version
+                 if parse_version(latest_host_version) > parse_version(installed_version):
+                     updates_available[pkg_name] = {
+                         "installed": installed_version,
+                         "latest": latest_host_version
+                     }
+             except ImportError:
+                  # Fallback to simple string comparison if packaging is not available
+                  if latest_host_version > installed_version: # Very basic fallback
+                      updates_available[pkg_name] = {
+                         "installed": installed_version,
+                         "latest": latest_host_version
+                     }
+             except Exception as e:
+                 print(f"{colors.warning(f'Could not compare versions for {pkg_name} ({installed_version} vs {latest_host_version}): {e}')}")
+
+
+    if not updates_available:
+        print(f"{colors.success('All specified packages are up-to-date.')}")
+    else:
+        print(f"\n{colors.prompt('Updates available:')}")
+        for pkg_name, versions in updates_available.items():
+            print(f"  {colors.colorize(pkg_name, colors.BOLD)}: {colors.warning(versions['installed'])} -> {colors.success(versions['latest'])}")
+        print(f"\n{colors.info('To install updates, run:')} {colors.colorize(f'rns-pkg install {profile_name} {" ".join([f"{p}=={v["latest"]}" for p,v in updates_available.items()])}', colors.BOLD)}")
+        # Return 1 to indicate updates are available, even though none were installed
+        return 1
+
+    return 0
+
+
+def handle_clean(args):
+    """Handles the 'clean' command."""
+    if args.target == "cache":
+        if not os.path.isdir(RNS_CACHE_DIR):
+            print(f"{colors.info('Cache directory does not exist:')} {RNS_CACHE_DIR}")
+            return 0
+
+        print(f"{colors.prompt('Cache directory:')} {RNS_CACHE_DIR}")
+        cache_files = []
+        total_size = 0
+        try:
+            for item in os.listdir(RNS_CACHE_DIR):
+                item_path = os.path.join(RNS_CACHE_DIR, item)
+                if os.path.isfile(item_path):
+                     try:
+                         size = os.path.getsize(item_path)
+                         cache_files.append((item, size))
+                         total_size += size
+                     except OSError:
+                         pass # Ignore files we can't access/stat
+                # Could add handling for unexpected subdirs later if needed
+        except OSError as e:
+            print(f"{colors.error('Error listing cache directory contents:')} {e}", file=sys.stderr)
+            return 1
+
+        if not cache_files:
+            print(f"{colors.info('Cache directory is empty.')}")
+            return 0
+
+        print(f"{colors.info(f'Found {len(cache_files)} file(s) totaling {size_str(total_size)}.')}")
+
+        if not args.yes:
+            try:
+                confirm = input(f"{colors.warning('Proceed with cleaning the cache? (y/N): ')}").lower()
+                if confirm != 'y':
+                    print(f"{colors.info('Cache cleaning cancelled.')}")
+                    return 0
+            except EOFError:
+                print(f"\n{colors.warning('Input closed, cancelling clean.')}")
+                return 1
+            except KeyboardInterrupt:
+                print(f"\n{colors.warning('Cache cleaning cancelled by user.')}")
+                return 130
+
+        print(f"{colors.info('Cleaning cache...')}")
+        removed_count = 0
+        error_count = 0
+        for filename, _ in cache_files:
+            file_path = os.path.join(RNS_CACHE_DIR, filename)
+            try:
+                os.remove(file_path)
+                removed_count += 1
+                RNS.log(f"Removed cached file: {file_path}", RNS.LOG_VERBOSE)
+            except OSError as e:
+                print(f"{colors.error(f'Error removing cache file {filename}:')} {e}", file=sys.stderr)
+                RNS.log(f"Error removing cache file {file_path}: {e}", RNS.LOG_ERROR)
+                error_count += 1
+
+        print(f"{colors.success(f'Cleaned {removed_count} file(s).')} Encountered {error_count} error(s).")
+        return 1 if error_count > 0 else 0
+
+    else:
+        print(f"{colors.error(f'Unknown target for clean command: {args.target}')}", file=sys.stderr)
+        return 1
+
+
+# --- Host Profile Commands ---
 def handle_host_add(args):
     """Handles the 'host add' command."""
     profile_name = args.name
@@ -1016,26 +1299,77 @@ def handle_host_find(args):
 def main():
     global reticulum, host_metadata_dest, host_fetch_dest, exit_event
 
-    parser = argparse.ArgumentParser(description="Reticulum Package Manager Client")
+    parser = argparse.ArgumentParser(
+        description="Reticulum Package Manager Client",
+        prog="rns-pkg" # Explicitly set program name
+    )
     parser.add_argument("--config", help="Path to alternative Reticulum config directory")
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to execute")
 
     # Search command
-    parser_search = subparsers.add_parser("search", help="Search for available packages on a host")
+    parser_search = subparsers.add_parser(
+        "search",
+        aliases=['s'],
+        help="Search for available packages on a host"
+    )
     parser_search.add_argument("host_specifier", help="Host profile name or metadata destination hash")
     parser_search.add_argument("package_term", nargs='?', help="Optional search term for package name")
     parser_search.set_defaults(func=handle_search)
 
     # Install command
-    parser_install = subparsers.add_parser("install", help="Install packages from a profiled host")
-    parser_install.add_argument("profile_name", help="Host profile name (must be added via 'host add')")
+    parser_install = subparsers.add_parser(
+        "install",
+        aliases=['i'],
+        help="Install packages from a host"
+    )
+    # Group for mutually exclusive host specification
+    install_host_group = parser_install.add_mutually_exclusive_group(required=True)
+    install_host_group.add_argument("--profile", dest="profile_name", help="Host profile name (must be added via 'host add')")
+    install_host_group.add_argument("--metadata-hash", help="Direct host metadata destination hash")
+    parser_install.add_argument("--fetch-hash", help="Direct host fetch destination hash (required if using --metadata-hash)")
     parser_install.add_argument("packages", nargs='+', help="Package(s) to install (e.g., pkgname or pkgname==version)")
     parser_install.set_defaults(func=handle_install)
 
+    # Uninstall command
+    parser_uninstall = subparsers.add_parser(
+        "uninstall",
+        aliases=['rm', 'remove'],
+        help="Uninstall locally installed packages"
+    )
+    parser_uninstall.add_argument("packages", nargs='+', help="Package name(s) to uninstall")
+    # parser_uninstall.add_argument("--yes", "-y", action="store_true", help="Automatically confirm removal") # TODO: Implement --yes flag
+    parser_uninstall.set_defaults(func=handle_uninstall)
+
+    # Update command
+    parser_update = subparsers.add_parser(
+        "update",
+        aliases=['up'],
+        help="Check for newer versions of installed packages on a host"
+    )
+    parser_update.add_argument("profile_name", help="Host profile name to check against")
+    parser_update.add_argument("packages", nargs='*', help="Specific package(s) to check (default: all installed)")
+    # parser_update.add_argument("--install", action="store_true", help="Automatically install available updates") # TODO: Implement install flag
+    parser_update.set_defaults(func=handle_update)
+
+
     # List command
-    parser_list = subparsers.add_parser("list", help="List installed packages")
+    parser_list = subparsers.add_parser(
+        "list",
+        aliases=['ls'],
+        help="List locally installed packages"
+    )
     # No host needed for list
     parser_list.set_defaults(func=handle_list)
+
+    # Clean command
+    parser_clean = subparsers.add_parser(
+        "clean",
+        help="Clean up local resources"
+    )
+    parser_clean.add_argument("target", choices=['cache'], help="What to clean (currently only 'cache')")
+    parser_clean.add_argument("--yes", "-y", action="store_true", help="Automatically confirm cleaning")
+    parser_clean.set_defaults(func=handle_clean)
+
 
     # Host command group
     parser_host = subparsers.add_parser("host", help="Manage package host profiles")
@@ -1065,24 +1399,37 @@ def main():
 
     args = parser.parse_args()
 
-    # Initialize Reticulum conditionally (needed for search, install, find)
-    if args.command in ["search", "install"] or (args.command == "host" and args.host_command == "find"):
+    # Validate install command direct hash usage
+    if args.command == "install" and args.metadata_hash and not args.fetch_hash:
+         parser.error("--fetch-hash is required when using --metadata-hash for install.")
+    if args.command == "install" and args.fetch_hash and not args.metadata_hash:
+         # This case is caught by the mutually exclusive group if profile_name is also missing
+         # but add an explicit check just in case.
+         parser.error("--metadata-hash is required when using --fetch-hash for install.")
+
+
+    # Initialize Reticulum conditionally (needed for search, install, update, find)
+    if args.command in ["search", "install", "update"] or (args.command == "host" and args.host_command == "find"):
         try:
-            reticulum = RNS.Reticulum(args.config)
-            print(f"{colors.info('rns-pkg using Reticulum config:')} {colors.detail(RNS.Reticulum.configdir)}")
+            # Only create instance if it doesn't exist
+            if not reticulum:
+                reticulum = RNS.Reticulum(args.config)
+                print(f"{colors.info('rns-pkg using Reticulum config:')} {colors.detail(RNS.Reticulum.configdir)}")
         except Exception as e:
              print(f"{colors.error('Error: Failed to initialize Reticulum:')} {e}", file=sys.stderr)
              print(f"{colors.warning('Check network interfaces and configuration.')}")
              sys.exit(1)
 
-    # Load profiles if needed
+    # Load profiles if potentially needed
     profiles = None
-    if args.command in ["search", "install"]:
+    if args.command in ["search", "install", "update"] or (args.command == "host" and args.host_command == "add"):
         profiles = load_host_profiles()
 
-    # Setup destinations only if needed (search, install)
+    # Setup destinations only if needed (search, install, update)
     metadata_hash_str = None
     fetch_hash_str = None
+
+    # Determine destination hashes based on command and args
     if args.command == "search":
         if args.host_specifier in profiles:
             metadata_hash_str = profiles[args.host_specifier].get("metadata_hash")
@@ -1093,19 +1440,37 @@ def main():
         else:
             # Assume it's a hash directly
             metadata_hash_str = args.host_specifier
+            # Fetch hash is not used for search
     elif args.command == "install":
-        if args.profile_name in profiles:
-            profile_data = profiles[args.profile_name]
-            metadata_hash_str = profile_data.get("metadata_hash")
-            fetch_hash_str = profile_data.get("fetch_hash")
-            if not metadata_hash_str or not fetch_hash_str:
-                print(colors.error(f"Error: Profile '{args.profile_name}' is incomplete (missing metadata or fetch hash)."), file=sys.stderr)
+        if args.profile_name:
+            if args.profile_name in profiles:
+                profile_data = profiles[args.profile_name]
+                metadata_hash_str = profile_data.get("metadata_hash")
+                fetch_hash_str = profile_data.get("fetch_hash")
+                if not metadata_hash_str or not fetch_hash_str:
+                    print(colors.error(f"Error: Profile '{args.profile_name}' is incomplete (missing metadata or fetch hash)."), file=sys.stderr)
+                    sys.exit(1)
+                print(f"{colors.info('Using profile:')} {args.profile_name}")
+            else:
+                print(colors.error(f"Error: Host profile '{args.profile_name}' not found."), file=sys.stderr)
                 sys.exit(1)
-            print(f"{colors.info('Using profile:')} {args.profile_name}")
+        elif args.metadata_hash and args.fetch_hash:
+            metadata_hash_str = args.metadata_hash
+            fetch_hash_str = args.fetch_hash
+            print(f"{colors.info('Using direct hashes:')}")
+            print(f"  Metadata: {colors.detail(metadata_hash_str)}")
+            print(f"  Fetch:    {colors.detail(fetch_hash_str)}")
         else:
-            print(colors.error(f"Error: Host profile '{args.profile_name}' not found. Use 'host list' to see profiles or 'host add' to create one."), file=sys.stderr)
-            sys.exit(1)
+             # Should be caught by argparse, but defensive check
+             print(colors.error("Error: Install requires either --profile or both --metadata-hash and --fetch-hash."), file=sys.stderr)
+             sys.exit(1)
+    elif args.command == "update":
+        # Update command already checks profile existence in its handler
+        # No destination setup needed here, handler does it.
+        pass
 
+
+    # Proceed with destination validation and setup if hashes were determined
     if metadata_hash_str:
         metadata_hash = parse_destination(metadata_hash_str)
         if not metadata_hash:
@@ -1117,44 +1482,87 @@ def main():
             if not fetch_hash:
                 sys.exit(1)
 
-        # Resolve paths
-        print(f"{colors.info('Resolving host paths...')}")
-        try:
-            if not resolve_path(metadata_hash, "metadata host"):
+        # Resolve paths if RNS is initialized
+        if reticulum:
+            print(f"{colors.info('Resolving host paths...')}")
+            resolved_metadata = False
+            resolved_fetch = False
+            try:
+                resolved_metadata = resolve_path(metadata_hash, "metadata host")
+                # Only resolve fetch if we have the hash and need it (install)
+                if fetch_hash and args.command == "install":
+                    resolved_fetch = resolve_path(fetch_hash, "fetch host")
+                else:
+                    # If fetch not needed (e.g. search), consider it resolved for this step
+                    resolved_fetch = True 
+
+                if not resolved_metadata or not resolved_fetch:
+                     print(colors.error("Error: Failed to resolve required host paths."), file=sys.stderr)
+                     sys.exit(1)
+
+            except Exception as e:
+                print(f"{colors.error('Error: Network error resolving paths:')} {e}", file=sys.stderr)
                 sys.exit(1)
-            if fetch_hash and not resolve_path(fetch_hash, "fetch host"):
-                sys.exit(1)
-        except Exception as e:
-            print(f"{colors.error('Error: Network error resolving paths:')} {e}", file=sys.stderr)
-            sys.exit(1)
 
-        # Create OUT destinations
-        try:
-            host_identity = RNS.Identity.recall(metadata_hash)
-            if not host_identity:
-                 if fetch_hash: host_identity = RNS.Identity.recall(fetch_hash)
+            # Create OUT destinations - Move assignment outside the try block
+            temp_metadata_dest = None
+            temp_fetch_dest = None
+            try:
+                # Try recalling identity from metadata hash first
+                host_identity = RNS.Identity.recall(metadata_hash)
+                if not host_identity and fetch_hash:
+                     # Try fetch hash if metadata didn't work or wasn't provided (e.g., future scenarios)
+                     host_identity = RNS.Identity.recall(fetch_hash)
 
-            if not host_identity:
-                 RNS.log("Could not recall host Identity from provided hashes.", RNS.LOG_CRITICAL)
-                 print(f"{colors.error('Error: Failed to identify the host from known destinations.')}", file=sys.stderr)
-                 sys.exit(1)
+                if not host_identity:
+                     RNS.log("Could not recall host Identity from provided hashes.", RNS.LOG_CRITICAL)
+                     print(f"{colors.error('Error: Failed to identify the host from provided destination hashes.')}", file=sys.stderr)
+                     # Add specific error for direct hash mode
+                     if args.metadata_hash:
+                          print(colors.error("Check if the provided metadata/fetch hashes correspond to a valid RNS Identity."), file=sys.stderr)
+                     else:
+                          print(f"{colors.error('Failed to identify the host from profile ')}'{args.profile_name if args.profile_name else args.host_specifier}'.", file=sys.stderr)
+                     sys.exit(1)
 
-            RNS.log(f"Recalled host identity: {RNS.prettyhexrep(host_identity.hash)}")
+                RNS.log(f"Recalled host identity: {RNS.prettyhexrep(host_identity.hash)}")
 
-            host_metadata_dest = RNS.Destination(
-                host_identity, RNS.Destination.OUT, RNS.Destination.SINGLE,
-                APP_NAME, METADATA_ASPECT
-            )
-
-            if fetch_hash:
-                host_fetch_dest = RNS.Destination(
+                # Create temporary destinations first
+                temp_metadata_dest = RNS.Destination(
                     host_identity, RNS.Destination.OUT, RNS.Destination.SINGLE,
-                    APP_NAME, FETCH_ASPECT
+                    APP_NAME, METADATA_ASPECT
                 )
-        except Exception as e:
-            RNS.log(f"Error creating destinations or recalling identity: {e}", RNS.LOG_CRITICAL)
-            print(f"{colors.error('Error: Network error setting up communication destinations:')} {e}", file=sys.stderr)
-            sys.exit(1)
+                RNS.log(f"Prepared metadata destination: {temp_metadata_dest}", RNS.LOG_DEBUG)
+
+                # Only create fetch destination if we have the hash and need it (install)
+                if fetch_hash and args.command == "install":
+                    temp_fetch_dest = RNS.Destination(
+                        host_identity, RNS.Destination.OUT, RNS.Destination.SINGLE,
+                        APP_NAME, FETCH_ASPECT
+                    )
+                    RNS.log(f"Prepared fetch destination: {temp_fetch_dest}", RNS.LOG_DEBUG)
+
+            except Exception as e:
+                RNS.log(f"Error creating destinations or recalling identity: {e}", RNS.LOG_CRITICAL)
+                print(f"{colors.error('Error: Network error setting up communication destinations:')} {e}", file=sys.stderr)
+                sys.exit(1)
+
+            # Assign to globals only if creation succeeded
+            if temp_metadata_dest:
+                 host_metadata_dest = temp_metadata_dest
+                 RNS.log(f"Assigned global host_metadata_dest: {host_metadata_dest}", RNS.LOG_DEBUG)
+            if temp_fetch_dest:
+                 host_fetch_dest = temp_fetch_dest
+                 RNS.log(f"Assigned global host_fetch_dest: {host_fetch_dest}", RNS.LOG_DEBUG)
+
+        else:
+             # Should not happen if command requires reticulum, but defensive check
+             if args.command in ["search", "install", "update"]:
+                  print(colors.error("Error: Reticulum not initialized, cannot proceed with network operations."), file=sys.stderr)
+                  sys.exit(1)
+
+
+    # DEBUG: Check state before calling handler
+    print(f"DEBUG: Before calling '{args.command}': host_metadata_dest is {host_metadata_dest}, host_fetch_dest is {host_fetch_dest}", file=sys.stderr)
 
     # Execute command function
     try:
