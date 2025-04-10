@@ -1,0 +1,9 @@
+packages/
+package_metadata.json
+downloads/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
