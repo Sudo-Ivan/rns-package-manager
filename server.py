@@ -1,14 +1,12 @@
 import os
 import sys
 import time
-import threading
 import argparse
 import RNS
-import RNS.vendor.umsgpack as umsgpack
 import hashlib
 import json
 
-from common import APP_NAME, DEFAULT_TIMEOUT, PACKAGE_METADATA_ASPECT, PACKAGE_DOWNLOAD_ASPECT, METADATA_FILENAME
+from common import APP_NAME, PACKAGE_METADATA_ASPECT, PACKAGE_DOWNLOAD_ASPECT, METADATA_FILENAME
 
 serve_path = None
 package_metadata_cache = {}
@@ -183,11 +181,10 @@ def metadata_request_handler(path, data, request_id, link_id, remote_identity, r
             # RNS.Transport.respond(request_id, metadata_json) # Not needed for link requests
             RNS.log(f"Sending metadata response (for link request {request_id[:6]}...)...")
             return metadata_json # Return data directly for link requests
-        else:
             # If still empty after trying to update, respond with error/empty
-             RNS.log("Metadata cache remains empty after update attempt.", RNS.LOG_ERROR)
-             # RNS.Transport.respond(request_id, b'{}') # Not needed for link requests
-             return b'{}' # Return empty JSON for link request
+        RNS.log("Metadata cache remains empty after update attempt.", RNS.LOG_ERROR)
+        # RNS.Transport.respond(request_id, b'{}') # Not needed for link requests
+        return b'{}' # Return empty JSON for link request
     except Exception as e:
         RNS.log(f"Error handling metadata request {request_id[:6]}...: {e}", RNS.LOG_ERROR)
         # Optionally try sending an error response

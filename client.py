@@ -6,7 +6,6 @@ import argparse
 import RNS
 import json
 import hashlib
-import math
 
 from common import APP_NAME, DEFAULT_TIMEOUT, PACKAGE_METADATA_ASPECT, PACKAGE_DOWNLOAD_ASPECT
 
@@ -211,8 +210,7 @@ def start_download(package_name, version_str, download_dir):
              RNS.log(f"File '{filename}' already exists with correct size. Skipping download.")
              # Maybe verify hash here if desired
              return
-        else:
-             RNS.log(f"File '{filename}' already exists but size differs. Will overwrite.", RNS.LOG_WARNING)
+        RNS.log(f"File '{filename}' already exists but size differs. Will overwrite.", RNS.LOG_WARNING)
 
     RNS.log(f"Preparing to download {package_name} version {current_package_info['version']} ({filename})...")
     establish_download_link()
